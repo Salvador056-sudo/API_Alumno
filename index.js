@@ -111,7 +111,7 @@ app.get('/api/alumnos/:id', async (req, res) => {
 app.get('/api/alumnos', async (req, res) => {
   try {
     const resultado = await pool.query(
-      'SELECT id, nombre, apaterno, amaterno, numero_control FROM alumnos ORDER BY nombre'
+      'SELECT id, nombre, apaterno, amaterno, numero_control FROM alumnos ORDER BY id ASC'
     );
     res.json(resultado.rows);
   } catch (err) {
