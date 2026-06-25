@@ -13,24 +13,30 @@ app.use(express.json());
 // ============================================
 
 // 1. POST - Registrar un nuevo alumno
+// 1. POST - Registrar un nuevo alumno
 app.post('/api/alumnos/registro', async (req, res) => {
   try {
     const { nombre, apaterno, amaterno, numero_control, password } = req.body;
     
-    // Validaciones
     if (!nombre || !apaterno || !amaterno || !numero_control || !password) {
       return res.status(400).json({ 
         error: 'Todos los campos son requeridos: nombre, apaterno, amaterno, numero_control, password' 
       });
     }
     
-    // Hashear contraseña
+    // ✅ Validación: Número de control debe tener exactamente 10 dígitos
+    if (!/^\d{10}$/.test(numero_control)) {
+      return res.status(400).json({ 
+        error: 'El número de control debe tener exactamente 10 dígitos numéricos' 
+      });
+    }
+    
     const saltRounds = 10;
     const passwordHash = await bcrypt.hash(password, saltRounds);
     
     const nuevo = await pool.query(
-      `INSERT INTO alumnos (nombre, apaterno, amaterno, numero_control, password) 
-       VALUES ($1, $2, $3, $4, $5) 
+      `INSERT INTO alumnos (nombre, apaterno, amaterno, numero_control, password, activo) 
+       VALUES ($1, $2, $3, $4, $5, true) 
        RETURNING id, nombre, apaterno, amaterno, numero_control`,
       [nombre, apaterno, amaterno, numero_control, passwordHash]
     );
@@ -87,12 +93,25 @@ app.post('/api/alumnos/login', async (req, res) => {
   }
 });
 
-// 3. GET - Obtener un alumno por ID
+// 3. GET - Obtener TODOS los alumnos (incluyendo inactivos) - solo para admin
+// ✅ IMPORTANTE: Esta ruta DEBE IR ANTES de /api/alumnos/:id
+app.get('/api/alumnos/todos', async (req, res) => {
+    try {
+        const resultado = await pool.query(
+            'SELECT id, nombre, apaterno, amaterno, numero_control, activo FROM alumnos ORDER BY apaterno ASC, nombre ASC'
+        );
+        res.json(resultado.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 4. GET - Obtener un alumno por ID
 app.get('/api/alumnos/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const resultado = await pool.query(
-      `SELECT id, nombre, apaterno, amaterno, numero_control 
+      `SELECT id, nombre, apaterno, amaterno, numero_control, activo
        FROM alumnos WHERE id = $1`,
       [id]
     );
@@ -107,11 +126,11 @@ app.get('/api/alumnos/:id', async (req, res) => {
   }
 });
 
-// 4. GET - Obtener todos los alumnos (solo para admin)
+// 5. GET - Obtener todos los alumnos activos (solo para admin)
 app.get('/api/alumnos', async (req, res) => {
   try {
     const resultado = await pool.query(
-      'SELECT id, nombre, apaterno, amaterno, numero_control FROM alumnos ORDER BY id ASC'
+      'SELECT id, nombre, apaterno, amaterno, numero_control FROM alumnos WHERE activo = true ORDER BY apaterno ASC, nombre ASC'
     );
     res.json(resultado.rows);
   } catch (err) {
@@ -119,26 +138,55 @@ app.get('/api/alumnos', async (req, res) => {
   }
 });
 
-// 5. DELETE - Eliminar un alumno
+// 6. DELETE - Soft Delete (desactivar alumno)
 app.delete('/api/alumnos/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const resultado = await pool.query(
-      'DELETE FROM alumnos WHERE id = $1 RETURNING id',
-      [id]
-    );
-    
-    if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: 'Alumno no encontrado' });
+    try {
+        const { id } = req.params;
+        const check = await pool.query('SELECT * FROM alumnos WHERE id = $1', [id]);
+        if (check.rows.length === 0) {
+            return res.status(404).json({ error: 'Alumno no encontrado' });
+        }
+        if (!check.rows[0].activo) {
+            return res.status(400).json({ error: 'El alumno ya está inactivo' });
+        }
+        const resultado = await pool.query(
+            'UPDATE alumnos SET activo = false WHERE id = $1 RETURNING id, nombre, apaterno, amaterno, numero_control, activo',
+            [id]
+        );
+        res.json({
+            mensaje: `Alumno "${resultado.rows[0].nombre} ${resultado.rows[0].apaterno}" desactivado correctamente`,
+            alumno: resultado.rows[0]
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    
-    res.json({ mensaje: 'Alumno eliminado correctamente' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
-// 6. PUT - Actualizar alumno
+// 7. PUT - Reactivar alumno
+app.put('/api/alumnos/:id/reactivar', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const check = await pool.query('SELECT * FROM alumnos WHERE id = $1', [id]);
+        if (check.rows.length === 0) {
+            return res.status(404).json({ error: 'Alumno no encontrado' });
+        }
+        if (check.rows[0].activo) {
+            return res.status(400).json({ error: 'El alumno ya está activo' });
+        }
+        const resultado = await pool.query(
+            'UPDATE alumnos SET activo = true WHERE id = $1 RETURNING id, nombre, apaterno, amaterno, numero_control, activo',
+            [id]
+        );
+        res.json({
+            mensaje: `Alumno "${resultado.rows[0].nombre} ${resultado.rows[0].apaterno}" reactivado correctamente`,
+            alumno: resultado.rows[0]
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 8. PUT - Actualizar alumno
 app.put('/api/alumnos/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -147,7 +195,6 @@ app.put('/api/alumnos/:id', async (req, res) => {
     let query = 'UPDATE alumnos SET nombre = $1, apaterno = $2, amaterno = $3, numero_control = $4';
     let params = [nombre, apaterno, amaterno, numero_control];
     
-    // Si se envía contraseña, se actualiza
     if (password) {
       const saltRounds = 10;
       const passwordHash = await bcrypt.hash(password, saltRounds);
@@ -158,7 +205,7 @@ app.put('/api/alumnos/:id', async (req, res) => {
       params.push(id);
     }
     
-    query += ' WHERE id = $' + params.length + ' RETURNING id, nombre, apaterno, amaterno, numero_control';
+    query += ' WHERE id = $' + params.length + ' RETURNING id, nombre, apaterno, amaterno, numero_control, activo';
     
     const resultado = await pool.query(query, params);
     
@@ -178,8 +225,7 @@ app.put('/api/alumnos/:id', async (req, res) => {
   }
 });
 
-// LISTEN
 const PORT = process.env.PORT || 6007;
 app.listen(PORT, () => {
-  console.log(` API Alumnos escuchando en http://localhost:${PORT}`);
+  console.log(`🎓 API Alumnos escuchando en http://localhost:${PORT}`);
 });
